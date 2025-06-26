@@ -23,6 +23,15 @@ import (
 	"github.com/jacobsa/fuse/fuseops"
 )
 
+const (
+	poolSize  = 1024
+	queueSize = 100
+)
+
+var (
+	ch = make(chan func(), queueSize)
+)
+
 // An interface with a method for each op type in the fuseops package. This can
 // be used in conjunction with NewFileSystemServer to avoid writing a "dispatch
 // loop" that switches on op types, instead receiving typed method calls
@@ -85,6 +94,21 @@ type FileSystem interface {
 // cf. https://tinyurl.com/bddm85v5, fuse-devel thread "Fuse guarantees on
 // concurrent requests").
 func NewFileSystemServer(fs FileSystem) fuse.Server {
+	return newFileSystemServer(fs)
+}
+
+func newFileSystemServer(fs FileSystem) fuse.Server {
+	for range poolSize {
+		go func() {
+			for {
+				f, ok := <-ch
+				if !ok {
+					break
+				}
+				f()
+			}
+		}()
+	}
 	return &fileSystemServer{
 		fs: fs,
 	}
@@ -101,6 +125,7 @@ func (s *fileSystemServer) ServeOps(c *fuse.Connection) {
 	defer func() {
 		s.opsInFlight.Wait()
 		s.fs.Destroy()
+		close(ch)
 	}()
 
 	for {
@@ -121,7 +146,7 @@ func (s *fileSystemServer) ServeOps(c *fuse.Connection) {
 			// cheap for the file system to handle
 			s.handleOp(c, ctx, op)
 		} else {
-			go s.handleOp(c, ctx, op)
+			ch <- func() { s.handleOp(c, ctx, op) }
 		}
 	}
 }
