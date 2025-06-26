@@ -147,6 +147,7 @@ func (s *fileSystemServer) ServeOps(c *fuse.Connection) {
 			s.handleOp(c, ctx, op)
 		} else {
 			ch <- func() { s.handleOp(c, ctx, op) }
+			//go s.handleOp(c, ctx, op)
 		}
 	}
 }
