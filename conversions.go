@@ -33,6 +33,13 @@ import (
 // Incoming messages
 ////////////////////////////////////////////////////////////////////////
 
+func loggedError(config *MountConfig, format string, args ...interface{}) error {
+	if config != nil && config.ErrorLogger != nil {
+		config.ErrorLogger.Printf(format, args...)
+	}
+	return fmt.Errorf(format, args...)
+}
+
 // Convert a kernel message to an appropriate op. If the op is unknown, a
 // special unexported type will be used.
 //
@@ -397,6 +404,9 @@ func convertInMessage(
 		}
 		// Use part of the incoming message storage as the read buffer.
 		to.Dst = inMsg.GetFree(int(in.Size))
+		if to.Dst == nil && in.Size > 0 {
+			return nil, loggedError(config, "Can't allocate %d-byte buffer for read", in.Size)
+		}
 		o = to
 
 	case fusekernel.OpReaddir:
@@ -420,6 +430,9 @@ func convertInMessage(
 		readSize := int(in.Size)
 		p := outMsg.Grow(readSize)
 		if p == nil {
+			if config != nil && config.ErrorLogger != nil {
+				config.ErrorLogger.Printf("Can't grow for %d-byte read", readSize)
+			}
 			return nil, fmt.Errorf("Can't grow for %d-byte read", readSize)
 		}
 
@@ -451,6 +464,9 @@ func convertInMessage(
 		readSize := int(in.Size)
 		p := outMsg.Grow(readSize)
 		if p == nil {
+			if config != nil && config.ErrorLogger != nil {
+				config.ErrorLogger.Printf("Can't grow for %d-byte read", readSize)
+			}
 			return nil, fmt.Errorf("Can't grow for %d-byte read", readSize)
 		}
 
@@ -672,6 +688,9 @@ func convertInMessage(
 		if readSize > 0 {
 			p := outMsg.Grow(readSize)
 			if p == nil {
+				if config != nil && config.ErrorLogger != nil {
+					config.ErrorLogger.Printf("Can't grow for %d-byte read", readSize)
+				}
 				return nil, fmt.Errorf("Can't grow for %d-byte read", readSize)
 			}
 
@@ -704,7 +723,7 @@ func convertInMessage(
 		if readSize != 0 {
 			p := outMsg.Grow(readSize)
 			if p == nil {
-				return nil, fmt.Errorf("Can't grow for %d-byte read", readSize)
+				return nil, loggedError(config, "Can't grow for %d-byte read", readSize)
 			}
 			sh := (*reflect.SliceHeader)(unsafe.Pointer(&to.Dst))
 			sh.Data = uintptr(p)
