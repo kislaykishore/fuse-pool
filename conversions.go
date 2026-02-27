@@ -398,6 +398,9 @@ func convertInMessage(
 		// Use part of the incoming message storage as the read buffer.
 		to.Dst = inMsg.GetFree(int(in.Size))
 		if to.Dst == nil && in.Size > 0 {
+			if config != nil && config.ErrorLogger != nil {
+				config.ErrorLogger.Printf("Can't allocate %d-byte buffer for read", in.Size)
+			}
 			return nil, fmt.Errorf("Can't allocate %d-byte buffer for read", in.Size)
 		}
 		o = to
@@ -423,6 +426,9 @@ func convertInMessage(
 		readSize := int(in.Size)
 		p := outMsg.Grow(readSize)
 		if p == nil {
+			if config != nil && config.ErrorLogger != nil {
+				config.ErrorLogger.Printf("Can't grow for %d-byte read", readSize)
+			}
 			return nil, fmt.Errorf("Can't grow for %d-byte read", readSize)
 		}
 
@@ -454,6 +460,9 @@ func convertInMessage(
 		readSize := int(in.Size)
 		p := outMsg.Grow(readSize)
 		if p == nil {
+			if config != nil && config.ErrorLogger != nil {
+				config.ErrorLogger.Printf("Can't grow for %d-byte read", readSize)
+			}
 			return nil, fmt.Errorf("Can't grow for %d-byte read", readSize)
 		}
 
@@ -675,6 +684,9 @@ func convertInMessage(
 		if readSize > 0 {
 			p := outMsg.Grow(readSize)
 			if p == nil {
+				if config != nil && config.ErrorLogger != nil {
+					config.ErrorLogger.Printf("Can't grow for %d-byte read", readSize)
+				}
 				return nil, fmt.Errorf("Can't grow for %d-byte read", readSize)
 			}
 
@@ -707,6 +719,9 @@ func convertInMessage(
 		if readSize != 0 {
 			p := outMsg.Grow(readSize)
 			if p == nil {
+				if config != nil && config.ErrorLogger != nil {
+					config.ErrorLogger.Printf("Can't grow for %d-byte read", readSize)
+				}
 				return nil, fmt.Errorf("Can't grow for %d-byte read", readSize)
 			}
 			sh := (*reflect.SliceHeader)(unsafe.Pointer(&to.Dst))
