@@ -185,8 +185,7 @@ func (c *Connection) Init() error {
 
 	// kernel 4.20 increases the max from 32 -> 256
 	initOp.Flags |= fusekernel.InitMaxPages
-	// Ensure that the kernel will not send requests greater than 1MiB chunks, preventing buffer overflows and crashes.
-	initOp.MaxPages = uint16((1 << 20) / os.Getpagesize())
+	initOp.MaxPages = 256
 
 	// Enable writeback caching if the user hasn't asked us not to.
 	if !c.cfg.DisableWritebackCaching {
