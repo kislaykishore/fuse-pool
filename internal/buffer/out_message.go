@@ -34,6 +34,10 @@ const OutMessageHeaderSize = int(unsafe.Sizeof(fusekernel.OutHeader{}))
 type OutMessage struct {
 	header fusekernel.OutHeader
 	Sglist [][]byte
+
+	// Preallocated storage to avoid heap allocations on small responses.
+	storage [8192]byte
+	offset  int
 }
 
 // Reset resets m so that it's ready to be used again. Afterward, the contents
@@ -41,6 +45,7 @@ type OutMessage struct {
 func (m *OutMessage) Reset() {
 	m.header = fusekernel.OutHeader{}
 	m.Sglist = nil
+	m.offset = 0
 }
 
 // OutHeader returns a pointer to the header at the start of the message.
@@ -51,6 +56,17 @@ func (m *OutMessage) OutHeader() *fusekernel.OutHeader {
 // Grow adds a new buffer of <n> bytes to the message, returning a pointer to
 // the start of the new segment, which is guaranteed to be zeroed.
 func (m *OutMessage) Grow(n int) unsafe.Pointer {
+	if m.offset+n <= len(m.storage) {
+		b := m.storage[m.offset : m.offset+n]
+		m.offset += n
+		// Zero the slice
+		for i := range b {
+			b[i] = 0
+		}
+		m.Append(b)
+		return unsafe.Pointer(&b[0])
+	}
+
 	b := make([]byte, n)
 	m.Append(b)
 	p := unsafe.Pointer(&b[0])
