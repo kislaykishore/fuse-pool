@@ -27,7 +27,6 @@ import (
 
 	"github.com/jacobsa/fuse/fuseops"
 	"github.com/jacobsa/fuse/internal/buffer"
-	"github.com/jacobsa/fuse/internal/freelist"
 	"github.com/jacobsa/fuse/internal/fusekernel"
 )
 
@@ -77,9 +76,9 @@ type Connection struct {
 	// GUARDED_BY(mu)
 	cancelFuncs map[uint64]func()
 
-	// Freelists, serviced by freelists.go.
-	inMessages  freelist.Freelist // GUARDED_BY(mu)
-	outMessages freelist.Freelist // GUARDED_BY(mu)
+	// Buffer pools, serviced by freelists.go.
+	inMessages  sync.Pool
+	outMessages sync.Pool
 }
 
 // State that is maintained for each in-flight op. This is stuffed into the
