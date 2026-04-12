@@ -70,11 +70,8 @@ type Connection struct {
 
 	mu sync.Mutex
 
-	// A map from fuse "unique" request ID (*not* the op ID for logging used
-	// above) to a function that cancel's its associated context.
-	//
-	// GUARDED_BY(mu)
-	cancelFuncs map[uint64]func()
+	// A map from fuse "unique" request ID to a function that cancel's its associated context.
+	cancelFuncs sync.Map
 
 	// Buffer pools, serviced by freelists.go.
 	inMessages  sync.Pool
@@ -117,7 +114,7 @@ func newConnection(
 		errorLogger: errorLogger,
 		wireLogger:  wireLogger,
 		dev:         dev,
-		cancelFuncs: make(map[uint64]func()),
+
 	}
 
 	// Initialize.
@@ -275,14 +272,9 @@ func (c *Connection) debugLog(
 func (c *Connection) recordCancelFunc(
 	fuseID uint64,
 	f func()) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if _, ok := c.cancelFuncs[fuseID]; ok {
+	if _, loaded := c.cancelFuncs.LoadOrStore(fuseID, f); loaded {
 		panic(fmt.Sprintf("Already have cancel func for request %v", fuseID))
 	}
-
-	c.cancelFuncs[fuseID] = f
 }
 
 // Set up state for an op that is about to be returned to the user, given its
@@ -323,9 +315,6 @@ func (c *Connection) beginOp(
 func (c *Connection) finishOp(
 	opCode uint32,
 	fuseID uint64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	// Even though the op is finished, context.WithCancel requires us to arrange
 	// for the cancellation function to be invoked. We also must remove it from
 	// our map.
@@ -333,21 +322,18 @@ func (c *Connection) finishOp(
 	// Special case: we don't do this for Forget requests. See the note in
 	// beginOp above.
 	if opCode != fusekernel.OpForget {
-		cancel, ok := c.cancelFuncs[fuseID]
+		v, ok := c.cancelFuncs.LoadAndDelete(fuseID)
 		if !ok {
 			panic(fmt.Sprintf("Unknown request ID in finishOp: %v", fuseID))
 		}
 
+		cancel := v.(func())
 		cancel()
-		delete(c.cancelFuncs, fuseID)
 	}
 }
 
 // LOCKS_EXCLUDED(c.mu)
 func (c *Connection) handleInterrupt(fuseID uint64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	// NOTE(jacobsa): fuse.txt in the Linux kernel documentation
 	// (https://tinyurl.com/2r4ajuwd) defines the kernel <-> userspace protocol
 	// for interrupts.
@@ -362,11 +348,12 @@ func (c *Connection) handleInterrupt(fuseID uint64) {
 	//
 	// Cf. https://github.com/osxfuse/osxfuse/issues/208
 	// Cf. http://comments.gmane.org/gmane.comp.file-systems.fuse.devel/14675
-	cancel, ok := c.cancelFuncs[fuseID]
+	v, ok := c.cancelFuncs.Load(fuseID)
 	if !ok {
 		return
 	}
 
+	cancel := v.(func())
 	cancel()
 }
 
