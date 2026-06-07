@@ -360,6 +360,14 @@ type CreateFileOp struct {
 	// The flags from the open(2) call, passed through the kernel's fuse driver
 	// to the FUSE daemon.
 	OpenFlags fusekernel.OpenFlags
+
+	// Set by the file system: if true, the kernel will attempt to use FUSE
+	// passthrough for read and write operations.
+	UsePassthrough bool
+
+	// Set by the file system: the registered backing file ID for FUSE
+	// passthrough.
+	BackingID uint32
 }
 
 // Create a symlink inode. If the name already exists, the file system should
@@ -690,6 +698,14 @@ type OpenFileOp struct {
 	OpenFlags fusekernel.OpenFlags
 
 	OpContext OpContext
+
+	// Set by the file system: if true, the kernel will attempt to use FUSE
+	// passthrough for read and write operations.
+	UsePassthrough bool
+
+	// Set by the file system: the registered backing file ID for FUSE
+	// passthrough.
+	BackingID uint32
 }
 
 // Read data from a file previously opened with CreateFile or OpenFile.

@@ -241,6 +241,11 @@ type MountConfig struct {
 	// to always provide ReadFileOp.Dst. If the file system populates ReadFileOp.Data,
 	// that data will be used for a vectored read, irrespective of this flag's value.
 	UseVectoredRead bool
+
+	// Linux only.
+	// Flag to enable FUSE passthrough, allowing the kernel to bypass userspace
+	// daemon for read/write operations on backing file descriptors.
+	EnablePassthrough bool
 }
 
 type FUSEImpl uint8

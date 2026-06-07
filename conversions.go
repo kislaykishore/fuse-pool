@@ -586,16 +586,26 @@ func convertInMessage(
 		}
 
 	case fusekernel.OpInit:
-		type input fusekernel.InitIn
-		in := (*input)(inMsg.Consume(unsafe.Sizeof(input{})))
-		if in == nil {
+		n := inMsg.Len()
+		consumed := inMsg.Consume(n)
+		if consumed == nil {
 			return nil, errors.New("Corrupt OpInit")
 		}
+		var in fusekernel.InitIn
+		copySize := n
+		if copySize > unsafe.Sizeof(in) {
+			copySize = unsafe.Sizeof(in)
+		}
+		srcSlice := (*[1 << 30]byte)(consumed)[:copySize]
+		dstSlice := (*[unsafe.Sizeof(in)]byte)(unsafe.Pointer(&in))[:]
+		copy(dstSlice, srcSlice)
+
+		inFlags := uint64(in.Flags) | (uint64(in.Flags2) << 32)
 
 		o = &initOp{
 			Kernel:       fusekernel.Protocol{in.Major, in.Minor},
 			MaxReadahead: in.MaxReadahead,
-			Flags:        fusekernel.InitFlags(in.Flags),
+			Flags:        fusekernel.InitFlags(inFlags),
 		}
 
 	case fusekernel.OpLink:
@@ -871,6 +881,10 @@ func (c *Connection) kernelResponseForOp(
 
 		oo := (*fusekernel.OpenOut)(m.Grow(int(unsafe.Sizeof(fusekernel.OpenOut{}))))
 		oo.Fh = uint64(o.Handle)
+		if o.UsePassthrough {
+			oo.OpenFlags |= uint32(fusekernel.OpenPassthrough)
+			oo.BackingID = o.BackingID
+		}
 
 	case *fuseops.CreateSymlinkOp:
 		size := int(fusekernel.EntryOutSize(c.protocol))
@@ -928,6 +942,11 @@ func (c *Connection) kernelResponseForOp(
 
 		if o.UseDirectIO {
 			out.OpenFlags |= uint32(fusekernel.OpenDirectIO)
+		}
+
+		if o.UsePassthrough {
+			out.OpenFlags |= uint32(fusekernel.OpenPassthrough)
+			out.BackingID = o.BackingID
 		}
 
 	case *fuseops.ReadFileOp:
@@ -1027,6 +1046,7 @@ func (c *Connection) kernelResponseForOp(
 		out.Minor = o.Library.Minor
 		out.MaxReadahead = o.MaxReadahead
 		out.Flags = uint32(o.Flags)
+		out.Flags2 = uint32(o.Flags >> 32)
 		// Default values
 		out.MaxBackground = 12
 		out.CongestionThreshold = 9

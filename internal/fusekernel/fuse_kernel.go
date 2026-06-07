@@ -46,7 +46,7 @@ const (
 	ProtoVersionMinMajor = 7
 	ProtoVersionMinMinor = 18
 	ProtoVersionMaxMajor = 7
-	ProtoVersionMaxMinor = 34
+	ProtoVersionMaxMinor = 40
 )
 
 const (
@@ -233,6 +233,7 @@ const (
 	OpenKeepCache   OpenResponseFlags = 1 << 1 // don't invalidate the data cache on open
 	OpenNonSeekable OpenResponseFlags = 1 << 2 // mark the file as non-seekable (not supported on OS X)
 	OpenCacheDir    OpenResponseFlags = 1 << 3 // allow caching this directory
+	OpenPassthrough OpenResponseFlags = 1 << 7 // enable FUSE passthrough
 
 	OpenPurgeAttr OpenResponseFlags = 1 << 30 // OS X
 	OpenPurgeUBC  OpenResponseFlags = 1 << 31 // OS X
@@ -247,12 +248,13 @@ var openResponseFlagNames = []flagName{
 	{uint32(OpenKeepCache), "OpenKeepCache"},
 	{uint32(OpenNonSeekable), "OpenNonSeekable"},
 	{uint32(OpenCacheDir), "OpenCacheDir"},
+	{uint32(OpenPassthrough), "OpenPassthrough"},
 	{uint32(OpenPurgeAttr), "OpenPurgeAttr"},
 	{uint32(OpenPurgeUBC), "OpenPurgeUBC"},
 }
 
 // The InitFlags are used in the Init exchange.
-type InitFlags uint32
+type InitFlags uint64
 
 const (
 	InitAsyncRead        InitFlags = 1 << 0
@@ -277,6 +279,7 @@ const (
 	InitMaxPages         InitFlags = 1 << 22
 	InitCacheSymlinks    InitFlags = 1 << 23
 	InitNoOpendirSupport InitFlags = 1 << 24
+	InitPassthrough      InitFlags = 1 << 37
 
 	InitCaseSensitive InitFlags = 1 << 29 // OS X only
 	InitVolRename     InitFlags = 1 << 30 // OS X only
@@ -288,36 +291,61 @@ type flagName struct {
 	name string
 }
 
-var initFlagNames = []flagName{
-	{uint32(InitAsyncRead), "InitAsyncRead"},
-	{uint32(InitPosixLocks), "InitPosixLocks"},
-	{uint32(InitFileOps), "InitFileOps"},
-	{uint32(InitAtomicTrunc), "InitAtomicTrunc"},
-	{uint32(InitExportSupport), "InitExportSupport"},
-	{uint32(InitBigWrites), "InitBigWrites"},
-	{uint32(InitMaxPages), "InitMaxPages"},
-	{uint32(InitDontMask), "InitDontMask"},
-	{uint32(InitSpliceWrite), "InitSpliceWrite"},
-	{uint32(InitSpliceMove), "InitSpliceMove"},
-	{uint32(InitSpliceRead), "InitSpliceRead"},
-	{uint32(InitFlockLocks), "InitFlockLocks"},
-	{uint32(InitHasIoctlDir), "InitHasIoctlDir"},
-	{uint32(InitAutoInvalData), "InitAutoInvalData"},
-	{uint32(InitDoReaddirplus), "InitDoReaddirplus"},
-	{uint32(InitReaddirplusAuto), "InitReaddirplusAuto"},
-	{uint32(InitAsyncDIO), "InitAsyncDIO"},
-	{uint32(InitWritebackCache), "InitWritebackCache"},
-	{uint32(InitNoOpenSupport), "InitNoOpenSupport"},
-	{uint32(InitCacheSymlinks), "InitCacheSymlinks"},
-	{uint32(InitNoOpendirSupport), "InitNoOpendirSupport"},
+type initFlagName struct {
+	bit  uint64
+	name string
+}
 
-	{uint32(InitCaseSensitive), "InitCaseSensitive"},
-	{uint32(InitVolRename), "InitVolRename"},
-	{uint32(InitXtimes), "InitXtimes"},
+var initFlagNames = []initFlagName{
+	{uint64(InitAsyncRead), "InitAsyncRead"},
+	{uint64(InitPosixLocks), "InitPosixLocks"},
+	{uint64(InitFileOps), "InitFileOps"},
+	{uint64(InitAtomicTrunc), "InitAtomicTrunc"},
+	{uint64(InitExportSupport), "InitExportSupport"},
+	{uint64(InitBigWrites), "InitBigWrites"},
+	{uint64(InitMaxPages), "InitMaxPages"},
+	{uint64(InitDontMask), "InitDontMask"},
+	{uint64(InitSpliceWrite), "InitSpliceWrite"},
+	{uint64(InitSpliceMove), "InitSpliceMove"},
+	{uint64(InitSpliceRead), "InitSpliceRead"},
+	{uint64(InitFlockLocks), "InitFlockLocks"},
+	{uint64(InitHasIoctlDir), "InitHasIoctlDir"},
+	{uint64(InitAutoInvalData), "InitAutoInvalData"},
+	{uint64(InitDoReaddirplus), "InitDoReaddirplus"},
+	{uint64(InitReaddirplusAuto), "InitReaddirplusAuto"},
+	{uint64(InitAsyncDIO), "InitAsyncDIO"},
+	{uint64(InitWritebackCache), "InitWritebackCache"},
+	{uint64(InitNoOpenSupport), "InitNoOpenSupport"},
+	{uint64(InitCacheSymlinks), "InitCacheSymlinks"},
+	{uint64(InitNoOpendirSupport), "InitNoOpendirSupport"},
+	{uint64(InitPassthrough), "InitPassthrough"},
+
+	{uint64(InitCaseSensitive), "InitCaseSensitive"},
+	{uint64(InitVolRename), "InitVolRename"},
+	{uint64(InitXtimes), "InitXtimes"},
 }
 
 func (fl InitFlags) String() string {
-	return flagString(uint32(fl), initFlagNames)
+	return initFlagString(uint64(fl), initFlagNames)
+}
+
+func initFlagString(f uint64, names []initFlagName) string {
+	var s string
+
+	if f == 0 {
+		return "0"
+	}
+
+	for _, n := range names {
+		if f&n.bit != 0 {
+			s += "+" + n.name
+			f &^= n.bit
+		}
+	}
+	if f != 0 {
+		s += fmt.Sprintf("%+#x", f)
+	}
+	return s[1:]
 }
 
 func flagString(f uint32, names []flagName) string {
@@ -549,7 +577,7 @@ type OpenIn struct {
 type OpenOut struct {
 	Fh        uint64
 	OpenFlags uint32
-	Padding   uint32
+	BackingID uint32
 }
 
 type CreateIn struct {
@@ -738,6 +766,8 @@ type InitIn struct {
 	Minor        uint32
 	MaxReadahead uint32
 	Flags        uint32
+	Flags2       uint32
+	Unused       [11]uint32
 }
 
 const InitInSize = int(unsafe.Sizeof(InitIn{}))
@@ -753,7 +783,10 @@ type InitOut struct {
 	TimeGran            uint32
 	MaxPages            uint16
 	MapAlignment        uint16
-	Unused              [8]uint32
+	Flags2              uint32
+	MaxStackDepth       uint32
+	RequestTimeout      uint16
+	Unused              [11]uint16
 }
 
 type InterruptIn struct {

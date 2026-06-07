@@ -24,6 +24,7 @@ import (
 	"runtime"
 	"sync"
 	"syscall"
+	"unsafe"
 
 	"github.com/jacobsa/fuse/fuseops"
 	"github.com/jacobsa/fuse/internal/buffer"
@@ -76,11 +77,15 @@ type Connection struct {
 	// Buffer pools, serviced by freelists.go.
 	inMessages  sync.Pool
 	outMessages sync.Pool
+
+	// passthroughEnabled is set to true if FUSE passthrough is negotiated with the kernel.
+	passthroughEnabled bool
 }
 
 // State that is maintained for each in-flight op. This is stuffed into the
 // context that the user uses to reply to the op.
 type opState struct {
+	conn   *Connection
 	inMsg  *buffer.InMessage
 	outMsg *buffer.OutMessage
 	op     interface{}
@@ -164,6 +169,7 @@ func (c *Connection) Init() error {
 	cacheSymlinks := initOp.Flags&fusekernel.InitCacheSymlinks > 0
 	noOpenSupport := initOp.Flags&fusekernel.InitNoOpenSupport > 0
 	noOpendirSupport := initOp.Flags&fusekernel.InitNoOpendirSupport > 0
+	passthroughSupport := initOp.Flags&fusekernel.InitPassthrough > 0
 
 	// Respond to the init op.
 	initOp.Library = c.protocol
@@ -171,6 +177,11 @@ func (c *Connection) Init() error {
 	initOp.MaxWrite = buffer.MaxWriteSize
 
 	initOp.Flags = 0
+
+	if c.cfg.EnablePassthrough && passthroughSupport {
+		initOp.Flags |= fusekernel.InitPassthrough
+		c.passthroughEnabled = true
+	}
 
 	// Tell the kernel not to use pitifully small 4 KiB writes.
 	initOp.Flags |= fusekernel.InitBigWrites
@@ -472,7 +483,7 @@ func (c *Connection) ReadOp() (_ context.Context, op interface{}, _ error) {
 		if c.wireLogger != nil {
 			wlog = NewWireLogRecord()
 		}
-		ctx = context.WithValue(ctx, contextKey, opState{inMsg, outMsg, op, wlog})
+		ctx = context.WithValue(ctx, contextKey, opState{c, inMsg, outMsg, op, wlog})
 
 		// Return the op to the user.
 		return ctx, op, nil
@@ -611,4 +622,53 @@ func (c *Connection) close() error {
 	// write, but luckily we exclude the possibility of a race by requiring the
 	// user to respond to all ops first.
 	return c.dev.Close()
+}
+
+// PassthroughEnabled returns true if FUSE passthrough is supported and negotiated.
+func (c *Connection) PassthroughEnabled() bool {
+	return c.passthroughEnabled
+}
+
+const (
+	fuseDevIocBackingOpen  = 0x4010E501
+	fuseDevIocBackingClose = 0x4004E502
+)
+
+type fuseBackingMap struct {
+	fd      int32
+	flags   uint32
+	padding uint64
+}
+
+// RegisterBackingFile registers a local backing file with the FUSE kernel
+// connection and returns a backing ID.
+func (c *Connection) RegisterBackingFile(fd int) (uint32, error) {
+	m := fuseBackingMap{
+		fd: int32(fd),
+	}
+
+	r1, _, errno := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		c.dev.Fd(),
+		fuseDevIocBackingOpen,
+		uintptr(unsafe.Pointer(&m)),
+	)
+	if errno != 0 {
+		return 0, errno
+	}
+	return uint32(r1), nil
+}
+
+// UnregisterBackingFile unregisters a backing file from the FUSE kernel connection.
+func (c *Connection) UnregisterBackingFile(backingID uint32) error {
+	_, _, errno := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		c.dev.Fd(),
+		fuseDevIocBackingClose,
+		uintptr(unsafe.Pointer(&backingID)),
+	)
+	if errno != 0 {
+		return errno
+	}
+	return nil
 }

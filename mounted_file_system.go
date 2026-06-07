@@ -64,3 +64,14 @@ func (mfs *MountedFileSystem) GetFuseContext(ctx context.Context) (uid, gid, pid
 	header := inMsg.Header()
 	return header.Uid, header.Gid, header.Pid, nil
 }
+
+// GetConnection retrieves the Connection from the context.
+// The context must be one passed by the FUSE server to a file system handler.
+func GetConnection(ctx context.Context) *Connection {
+	foo := ctx.Value(contextKey)
+	state, ok := foo.(opState)
+	if !ok {
+		return nil
+	}
+	return state.conn
+}
