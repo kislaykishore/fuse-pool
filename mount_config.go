@@ -276,6 +276,10 @@ type MountConfig struct {
 	// If unset, a default value of 1 MiB is used (or less if MaxPages is set
 	// to a value smaller than 256 pages).
 	MaxWrite uint32
+
+	// If true, FUSE interrupt requests are ignored and per-op cancelable contexts
+	// are not allocated.
+	IgnoreInterrupts bool
 }
 
 type FUSEImpl uint8

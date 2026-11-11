@@ -15,46 +15,50 @@
 package fuse
 
 import (
-	"unsafe"
+	"sync"
 
 	"github.com/jacobsa/fuse/internal/buffer"
 )
+
+var opStatePool = sync.Pool{
+	New: func() any {
+		return new(opState)
+	},
+}
+
+func getOpState() *opState {
+	return opStatePool.Get().(*opState)
+}
+
+func putOpState(s *opState) {
+	*s = opState{}
+	opStatePool.Put(s)
+}
 
 ////////////////////////////////////////////////////////////////////////
 // buffer.InMessage
 ////////////////////////////////////////////////////////////////////////
 
-// LOCKS_EXCLUDED(c.mu)
 func (c *Connection) getInMessage() *buffer.InMessage {
-	c.mu.Lock()
-	x := (*buffer.InMessage)(c.inMessages.Get())
-	c.mu.Unlock()
-
-	if x == nil {
+	x, ok := c.inMessages.Get().(*buffer.InMessage)
+	if !ok || x == nil {
 		x = buffer.NewInMessage(c.inMessageBufSize)
 	}
 
 	return x
 }
 
-// LOCKS_EXCLUDED(c.mu)
 func (c *Connection) putInMessage(x *buffer.InMessage) {
-	c.mu.Lock()
-	c.inMessages.Put(unsafe.Pointer(x))
-	c.mu.Unlock()
+	c.inMessages.Put(x)
 }
 
 ////////////////////////////////////////////////////////////////////////
 // buffer.OutMessage
 ////////////////////////////////////////////////////////////////////////
 
-// LOCKS_EXCLUDED(c.mu)
 func (c *Connection) getOutMessage() *buffer.OutMessage {
-	c.mu.Lock()
-	x := (*buffer.OutMessage)(c.outMessages.Get())
-	c.mu.Unlock()
-
-	if x == nil {
+	x, ok := c.outMessages.Get().(*buffer.OutMessage)
+	if !ok || x == nil {
 		x = new(buffer.OutMessage)
 	}
 	x.Reset()
@@ -62,9 +66,6 @@ func (c *Connection) getOutMessage() *buffer.OutMessage {
 	return x
 }
 
-// LOCKS_EXCLUDED(c.mu)
 func (c *Connection) putOutMessage(x *buffer.OutMessage) {
-	c.mu.Lock()
-	c.outMessages.Put(unsafe.Pointer(x))
-	c.mu.Unlock()
+	c.outMessages.Put(x)
 }

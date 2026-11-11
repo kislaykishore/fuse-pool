@@ -27,7 +27,6 @@ import (
 
 	"github.com/jacobsa/fuse/fuseops"
 	"github.com/jacobsa/fuse/internal/buffer"
-	"github.com/jacobsa/fuse/internal/freelist"
 	"github.com/jacobsa/fuse/internal/fusekernel"
 )
 
@@ -36,24 +35,6 @@ type contextKeyType uint64
 var contextKey interface{} = contextKeyType(0)
 
 // Ask the Linux kernel for larger read requests.
-//
-// As of 2015-03-26, the behavior in the kernel is:
-//
-//   - (https://tinyurl.com/2eakn5e9, https://tinyurl.com/mry9e33d) Set the
-//     local variable ra_pages to be init_response->max_readahead divided by
-//     the page size.
-//
-//   - (https://tinyurl.com/2eakn5e9, https://tinyurl.com/mbpshk8h) Set
-//     backing_dev_info::ra_pages to the min of that value and what was sent in
-//     the request's max_readahead field.
-//
-//   - (https://tinyurl.com/57hpfu4x) Use backing_dev_info::ra_pages when
-//     deciding how much to read ahead.
-//
-//   - (https://tinyurl.com/ywhfcfte) Don't read ahead at all if that field is
-//     zero.
-//
-// Reading a page at a time is a drag. Ask for a larger size.
 const maxReadahead = 1 << 20
 
 // Connection represents a connection to the fuse kernel process. It is used to
@@ -64,22 +45,18 @@ type Connection struct {
 	errorLogger *log.Logger
 	wireLogger  io.Writer
 
-	// The device through which we're talking to the kernel, and the protocol
-	// version that we're using to talk to it.
+	// The device through which we are talking to the kernel, and the protocol
+	// version that we are using to talk to it.
 	dev      *os.File
 	protocol fusekernel.Protocol
 
-	mu sync.Mutex
-
 	// A map from fuse "unique" request ID (*not* the op ID for logging used
-	// above) to a function that cancel's its associated context.
-	//
-	// GUARDED_BY(mu)
-	cancelFuncs map[uint64]func()
+	// above) to a function that cancels its associated context.
+	cancelFuncs sync.Map
 
-	// Freelists, serviced by freelists.go.
-	inMessages  freelist.Freelist // GUARDED_BY(mu)
-	outMessages freelist.Freelist // GUARDED_BY(mu)
+	// Pools, serviced by freelists.go.
+	inMessages  sync.Pool
+	outMessages sync.Pool
 
 	// Size of the buffer to allocate for each InMessage.
 	inMessageBufSize int
@@ -88,15 +65,29 @@ type Connection struct {
 // State that is maintained for each in-flight op. This is stuffed into the
 // context that the user uses to reply to the op.
 type opState struct {
+	context.Context
 	inMsg  *buffer.InMessage
 	outMsg *buffer.OutMessage
 	op     interface{}
 	wlog   *WireLogRecord
 }
 
+func (s *opState) Value(key interface{}) interface{} {
+	if key == contextKey {
+		return *s
+	}
+	if s.Context != nil {
+		return s.Context.Value(key)
+	}
+	return nil
+}
+
 // Return the current wirelog record from the context if the MountConfig
 // contained a non-nil wireLogger, nil otherwise.
 func GetWirelog(ctx context.Context) *WireLogRecord {
+	if s, ok := ctx.(*opState); ok {
+		return s.wlog
+	}
 	val := ctx.Value(contextKey)
 	state, ok := val.(opState)
 	if ok {
@@ -121,7 +112,6 @@ func newConnection(
 		errorLogger: errorLogger,
 		wireLogger:  wireLogger,
 		dev:         dev,
-		cancelFuncs: make(map[uint64]func()),
 	}
 
 	// Initialize.
@@ -200,12 +190,9 @@ func (c *Connection) Init() error {
 	// kernel 4.20 increases the max from 32 -> 256
 	initOp.Flags |= fusekernel.InitMaxPages
 
-	// MaxPages is the maximum size, in hardware pages, of the FUSE message
-	// payload. It applies to both requests and replies, and does not include
-	// the extra 1 page for the FUSE header and the "args" struct.
 	initOp.MaxPages = c.cfg.MaxPages
 
-	// Enable writeback caching if the user hasn't asked us not to.
+	// Enable writeback caching if the user has not asked us not to.
 	if !c.cfg.DisableWritebackCaching {
 		initOp.Flags |= fusekernel.InitWritebackCache
 	}
@@ -284,40 +271,29 @@ func (c *Connection) debugLog(
 	c.debugLogger.Println(msg)
 }
 
-// LOCKS_EXCLUDED(c.mu)
 func (c *Connection) recordCancelFunc(
 	fuseID uint64,
 	f func()) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if _, ok := c.cancelFuncs[fuseID]; ok {
+	if _, loaded := c.cancelFuncs.LoadOrStore(fuseID, f); loaded {
 		panic(fmt.Sprintf("Already have cancel func for request %v", fuseID))
 	}
-
-	c.cancelFuncs[fuseID] = f
 }
 
 // Set up state for an op that is about to be returned to the user, given its
 // underlying fuse opcode and request ID.
 //
 // Return a context that should be used for the op.
-//
-// LOCKS_EXCLUDED(c.mu)
 func (c *Connection) beginOp(
 	opCode uint32,
 	fuseID uint64) context.Context {
 	// Start with the parent context.
 	ctx := c.cfg.OpContext
 
+	if c.cfg.IgnoreInterrupts {
+		return ctx
+	}
+
 	// Set up a cancellation function.
-	//
-	// Special case: On Darwin, osxfuse aggressively reuses "unique" request IDs.
-	// This matters for Forget requests, which have no reply associated and
-	// therefore have IDs that are immediately eligible for reuse. For these, we
-	// should not record any state keyed on their ID.
-	//
-	// Cf. https://github.com/osxfuse/osxfuse/issues/208
 	if opCode != fusekernel.OpForget {
 		var cancel func()
 		ctx, cancel = context.WithCancel(ctx)
@@ -329,57 +305,37 @@ func (c *Connection) beginOp(
 
 // Clean up all state associated with an op to which the user has responded,
 // given its underlying fuse opcode and request ID. This must be called before
-// a response is sent to the kernel, to avoid a race where the request's ID
+// a response is sent to the kernel, to avoid a race where the request ID
 // might be reused by osxfuse.
-//
-// LOCKS_EXCLUDED(c.mu)
 func (c *Connection) finishOp(
 	opCode uint32,
 	fuseID uint64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if c.cfg.IgnoreInterrupts {
+		return
+	}
 
-	// Even though the op is finished, context.WithCancel requires us to arrange
-	// for the cancellation function to be invoked. We also must remove it from
-	// our map.
-	//
-	// Special case: we don't do this for Forget requests. See the note in
-	// beginOp above.
 	if opCode != fusekernel.OpForget {
-		cancel, ok := c.cancelFuncs[fuseID]
+		val, ok := c.cancelFuncs.LoadAndDelete(fuseID)
 		if !ok {
 			panic(fmt.Sprintf("Unknown request ID in finishOp: %v", fuseID))
 		}
 
+		cancel := val.(func())
 		cancel()
-		delete(c.cancelFuncs, fuseID)
 	}
 }
 
-// LOCKS_EXCLUDED(c.mu)
 func (c *Connection) handleInterrupt(fuseID uint64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if c.cfg.IgnoreInterrupts {
+		return
+	}
 
-	// NOTE(jacobsa): fuse.txt in the Linux kernel documentation
-	// (https://tinyurl.com/2r4ajuwd) defines the kernel <-> userspace protocol
-	// for interrupts.
-	//
-	// In particular, my reading of it is that an interrupt request cannot be
-	// delivered to userspace before the original request. The part about the
-	// race and EAGAIN appears to be aimed at userspace programs that
-	// concurrently process requests (https://tinyurl.com/3euehwfb).
-	//
-	// So in this method if we can't find the ID to be interrupted, it means that
-	// the request has already been replied to.
-	//
-	// Cf. https://github.com/osxfuse/osxfuse/issues/208
-	// Cf. http://comments.gmane.org/gmane.comp.file-systems.fuse.devel/14675
-	cancel, ok := c.cancelFuncs[fuseID]
+	val, ok := c.cancelFuncs.Load(fuseID)
 	if !ok {
 		return
 	}
 
+	cancel := val.(func())
 	cancel()
 }
 
@@ -394,13 +350,6 @@ func (c *Connection) readMessage() (*buffer.InMessage, error) {
 		// Attempt a read.
 		err := m.Init(c.dev)
 
-		// Special cases:
-		//
-		//  *  ENODEV means fuse has hung up.
-		//
-		//  *  EINTR means we should try again. (This seems to happen often on
-		//     OS X, cf. http://golang.org/issue/11180)
-		//
 		if pe, ok := err.(*os.PathError); ok {
 			switch pe.Err {
 			case syscall.ENODEV:
@@ -425,7 +374,7 @@ func (c *Connection) readMessage() (*buffer.InMessage, error) {
 // and write if not.
 func (c *Connection) writeOutMessage(outMsg *buffer.OutMessage) error {
 	var err error
-	if outMsg.Sglist != nil {
+	if len(outMsg.Sglist) > 0 {
 		if fusekernel.IsPlatformFuseT {
 			// writev is not atomic on macos, restrict to fuse-t platform
 			writeLock.Lock()
@@ -456,14 +405,6 @@ func (c *Connection) writeMessage(msg []byte) error {
 // ReadOp consumes the next op from the kernel process, returning the op and a
 // context that should be used for work related to the op. It returns io.EOF if
 // the kernel has closed the connection.
-//
-// If err != nil, the user is responsible for later calling c.Reply with the
-// returned context.
-//
-// This function delivers ops in exactly the order they are received from
-// /dev/fuse. It must not be called multiple times concurrently.
-//
-// LOCKS_EXCLUDED(c.mu)
 func (c *Connection) ReadOp() (_ context.Context, op interface{}, _ error) {
 	// Keep going until we find a request we know how to convert.
 	for {
@@ -477,6 +418,7 @@ func (c *Connection) ReadOp() (_ context.Context, op interface{}, _ error) {
 		outMsg := c.getOutMessage()
 		op, err = convertInMessage(&c.cfg, inMsg, outMsg, c.protocol)
 		if err != nil {
+			c.putInMessage(inMsg)
 			c.putOutMessage(outMsg)
 			return nil, nil, fmt.Errorf("convertInMessage: %v", err)
 		}
@@ -489,6 +431,8 @@ func (c *Connection) ReadOp() (_ context.Context, op interface{}, _ error) {
 		// Special case: handle interrupt requests inline.
 		if interruptOp, ok := op.(*interruptOp); ok {
 			c.handleInterrupt(interruptOp.FuseID)
+			c.putInMessage(inMsg)
+			c.putOutMessage(outMsg)
 			continue
 		}
 
@@ -498,10 +442,15 @@ func (c *Connection) ReadOp() (_ context.Context, op interface{}, _ error) {
 		if c.wireLogger != nil {
 			wlog = NewWireLogRecord()
 		}
-		ctx = context.WithValue(ctx, contextKey, opState{inMsg, outMsg, op, wlog})
+		state := getOpState()
+		state.Context = ctx
+		state.inMsg = inMsg
+		state.outMsg = outMsg
+		state.op = op
+		state.wlog = wlog
 
 		// Return the op to the user.
-		return ctx, op, nil
+		return state, op, nil
 	}
 }
 
@@ -509,21 +458,18 @@ func (c *Connection) ReadOp() (_ context.Context, op interface{}, _ error) {
 func (c *Connection) shouldLogError(
 	op interface{},
 	err error) bool {
-	// We don't log non-errors.
+	// We do not log non-errors.
 	if err == nil {
 		return false
 	}
 
-	// We can't log if there's nothing to log to.
+	// We cannot log if there is nothing to log to.
 	if c.errorLogger == nil {
 		return false
 	}
 
 	switch op.(type) {
 	case *fuseops.LookUpInodeOp:
-		// It is totally normal for the kernel to ask to look up an inode by name
-		// and find the name doesn't exist. For example, this happens when linking
-		// a new file.
 		if err == syscall.ENOENT {
 			return false
 		}
@@ -532,7 +478,6 @@ func (c *Connection) shouldLogError(
 			return false
 		}
 	case *unknownOp:
-		// Don't bother the user with methods we intentionally don't support.
 		if err == syscall.ENOSYS {
 			return false
 		}
@@ -545,15 +490,20 @@ var writeLock sync.Mutex
 
 // Reply replies to an op previously read using ReadOp, with the supplied error
 // (or nil if successful). The context must be the context returned by ReadOp.
-//
-// LOCKS_EXCLUDED(c.mu)
 func (c *Connection) Reply(ctx context.Context, opErr error) error {
 	// Extract the state we stuffed in earlier.
-	var key interface{} = contextKey
-	foo := ctx.Value(key)
-	state, ok := foo.(opState)
-	if !ok {
-		panic(fmt.Sprintf("Reply called with invalid context: %#v", ctx))
+	var state opState
+	statePtr, isPooledState := ctx.(*opState)
+	if isPooledState {
+		state = *statePtr
+	} else {
+		var key interface{} = contextKey
+		foo := ctx.Value(key)
+		var ok bool
+		state, ok = foo.(opState)
+		if !ok {
+			panic(fmt.Sprintf("Reply called with invalid context: %#v", ctx))
+		}
 	}
 
 	op := state.op
@@ -569,9 +519,12 @@ func (c *Connection) Reply(ctx context.Context, opErr error) error {
 			callback()
 		}
 
-		// Make sure we destroy the messages when we're done.
+		// Make sure we destroy the messages when we are done.
 		c.putInMessage(inMsg)
 		c.putOutMessage(outMsg)
+		if isPooledState {
+			putOpState(statePtr)
+		}
 	}()
 
 	// Clean up state for this op.
@@ -607,7 +560,6 @@ func (c *Connection) Reply(ctx context.Context, opErr error) error {
 			}
 			return fmt.Errorf(writeErrMsg)
 		}
-		outMsg.Sglist = nil
 	}
 
 	if c.wireLogger != nil {
@@ -659,8 +611,5 @@ func (c *Connection) sanitizeMaxPagesAndWrite() error {
 // Close the connection. Must not be called until operations that were read
 // from the connection have been responded to.
 func (c *Connection) close() error {
-	// Posix doesn't say that close can be called concurrently with read or
-	// write, but luckily we exclude the possibility of a race by requiring the
-	// user to respond to all ops first.
 	return c.dev.Close()
 }
