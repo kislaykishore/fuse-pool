@@ -442,12 +442,13 @@ func (c *Connection) ReadOp() (_ context.Context, op interface{}, _ error) {
 		if c.wireLogger != nil {
 			wlog = NewWireLogRecord()
 		}
-		state := getOpState()
-		state.Context = ctx
-		state.inMsg = inMsg
-		state.outMsg = outMsg
-		state.op = op
-		state.wlog = wlog
+		state := &opState{
+			Context: ctx,
+			inMsg:   inMsg,
+			outMsg:  outMsg,
+			op:      op,
+			wlog:    wlog,
+		}
 
 		// Return the op to the user.
 		return state, op, nil
@@ -522,9 +523,6 @@ func (c *Connection) Reply(ctx context.Context, opErr error) error {
 		// Make sure we destroy the messages when we are done.
 		c.putInMessage(inMsg)
 		c.putOutMessage(outMsg)
-		if isPooledState {
-			putOpState(statePtr)
-		}
 	}()
 
 	// Clean up state for this op.

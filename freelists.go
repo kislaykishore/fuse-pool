@@ -15,25 +15,8 @@
 package fuse
 
 import (
-	"sync"
-
 	"github.com/jacobsa/fuse/internal/buffer"
 )
-
-var opStatePool = sync.Pool{
-	New: func() any {
-		return new(opState)
-	},
-}
-
-func getOpState() *opState {
-	return opStatePool.Get().(*opState)
-}
-
-func putOpState(s *opState) {
-	*s = opState{}
-	opStatePool.Put(s)
-}
 
 ////////////////////////////////////////////////////////////////////////
 // buffer.InMessage
