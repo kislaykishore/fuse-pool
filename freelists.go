@@ -50,5 +50,6 @@ func (c *Connection) getOutMessage() *buffer.OutMessage {
 }
 
 func (c *Connection) putOutMessage(x *buffer.OutMessage) {
+	x.Reset()
 	c.outMessages.Put(x)
 }

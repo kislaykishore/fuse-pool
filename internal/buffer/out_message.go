@@ -58,7 +58,7 @@ func (m *OutMessage) OutHeader() *fusekernel.OutHeader {
 // Grow adds a new buffer of <n> bytes to the message, returning a pointer to
 // the start of the new segment, which is guaranteed to be zeroed.
 func (m *OutMessage) Grow(n int) unsafe.Pointer {
-	if n == 0 {
+	if n <= 0 {
 		return nil
 	}
 	var b []byte
@@ -89,6 +89,7 @@ func (m *OutMessage) ShrinkTo(n int) {
 	if n == OutMessageHeaderSize {
 		clear(m.Sglist)
 		m.Sglist = m.Sglist[:0]
+		m.offset = 0
 	} else {
 		i := 1
 		n -= OutMessageHeaderSize
@@ -102,6 +103,22 @@ func (m *OutMessage) ShrinkTo(n int) {
 		}
 		clear(m.Sglist[i:])
 		m.Sglist = m.Sglist[0:i]
+
+		storageStart := uintptr(unsafe.Pointer(&m.storage[0]))
+		storageEnd := storageStart + uintptr(len(m.storage))
+		newOffset := 0
+		for j := i - 1; j >= 1; j-- {
+			s := m.Sglist[j]
+			if len(s) == 0 {
+				continue
+			}
+			p := uintptr(unsafe.Pointer(&s[0]))
+			if p >= storageStart && p < storageEnd {
+				newOffset = int(p-storageStart) + len(s)
+				break
+			}
+		}
+		m.offset = newOffset
 	}
 }
 

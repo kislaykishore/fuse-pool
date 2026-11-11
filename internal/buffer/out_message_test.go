@@ -224,10 +224,11 @@ func TestOutMessageGrow(t *testing.T) {
 
 	// Set up garbage where the payload will soon be.
 	const payloadSize = 1234
+	var firstPtr unsafe.Pointer
 	{
-		p := om.Grow(payloadSize)
+		firstPtr = om.Grow(payloadSize)
 
-		err := fillWithGarbage(p, payloadSize)
+		err := fillWithGarbage(firstPtr, payloadSize)
 		if err != nil {
 			t.Fatalf("fillWithGarbage: %v", err)
 		}
@@ -235,9 +236,13 @@ func TestOutMessageGrow(t *testing.T) {
 		om.ShrinkTo(OutMessageHeaderSize)
 	}
 
-	// Call Grow.
-	if p := om.Grow(payloadSize); p == nil {
+	// Call Grow. It should reuse the exact same inline storage region after ShrinkTo.
+	p := om.Grow(payloadSize)
+	if p == nil {
 		t.Fatal("Grow failed")
+	}
+	if p != firstPtr {
+		t.Fatalf("Grow after ShrinkTo(OutMessageHeaderSize) returned %p, want %p (inline storage not rewound)", p, firstPtr)
 	}
 
 	// Check the resulting length in two ways.
@@ -259,6 +264,57 @@ func TestOutMessageGrow(t *testing.T) {
 		if x != 0 {
 			t.Fatalf("non-zero byte 0x%02x at payload offset %d", x, i)
 		}
+	}
+}
+
+func TestOutMessageShrinkToRewindsInlineOffset(t *testing.T) {
+	var om OutMessage
+	om.Reset()
+
+	if p := om.Grow(0); p != nil {
+		t.Fatalf("Grow(0) = %p, want nil", p)
+	}
+	if p := om.Grow(-5); p != nil {
+		t.Fatalf("Grow(-5) = %p, want nil", p)
+	}
+
+	// Allocate two segments in inline storage and dirty both.
+	p1 := om.Grow(100)
+	p2 := om.Grow(200)
+	if err := fillWithGarbage(p1, 100); err != nil {
+		t.Fatalf("fillWithGarbage: %v", err)
+	}
+	if err := fillWithGarbage(p2, 200); err != nil {
+		t.Fatalf("fillWithGarbage: %v", err)
+	}
+
+	// Partially shrink into the second segment (keep 100 + 50 = 150 payload bytes).
+	om.ShrinkTo(OutMessageHeaderSize + 150)
+	if om.offset != 150 {
+		t.Fatalf("om.offset = %d after partial ShrinkTo, want 150", om.offset)
+	}
+
+	// Next Grow(150) should start at storage[150] and zero the reclaimed bytes.
+	p3 := om.Grow(150)
+	wantP3 := unsafe.Pointer(uintptr(p2) + 50)
+	if p3 != wantP3 {
+		t.Fatalf("Grow(150) after partial ShrinkTo returned %p, want %p", p3, wantP3)
+	}
+	if off := findNonZero(p3, 150); off != 150 {
+		t.Fatalf("non-zero byte at offset %d in reclaimed inline storage", off)
+	}
+
+	// Reset and test shrinking back to only an external Append slice.
+	om.Reset()
+	ext := []byte("external")
+	om.Append(ext)
+	om.Grow(256)
+	if om.offset != 256 {
+		t.Fatalf("om.offset = %d, want 256", om.offset)
+	}
+	om.ShrinkTo(OutMessageHeaderSize + len(ext))
+	if om.offset != 0 {
+		t.Fatalf("om.offset = %d after shrinking away all inline segments, want 0", om.offset)
 	}
 }
 
