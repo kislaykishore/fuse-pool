@@ -83,43 +83,45 @@ func (m *OutMessage) ShrinkTo(n int) {
 			n,
 			curLen))
 	}
+	if n == OutMessageHeaderSize {
+		if len(m.Sglist) > 0 {
+			clear(m.Sglist)
+			m.Sglist = m.Sglist[:0]
+		}
+		m.offset = 0
+		return
+	}
 	if n == curLen {
 		return
 	}
-	if n == OutMessageHeaderSize {
-		clear(m.Sglist)
-		m.Sglist = m.Sglist[:0]
-		m.offset = 0
-	} else {
-		i := 1
-		n -= OutMessageHeaderSize
-		for len(m.Sglist) > i && n >= len(m.Sglist[i]) {
-			n -= len(m.Sglist[i])
-			i++
-		}
-		if n > 0 {
-			m.Sglist[i] = m.Sglist[i][0:n]
-			i++
-		}
-		clear(m.Sglist[i:])
-		m.Sglist = m.Sglist[0:i]
-
-		storageStart := uintptr(unsafe.Pointer(&m.storage[0]))
-		storageEnd := storageStart + uintptr(len(m.storage))
-		newOffset := 0
-		for j := i - 1; j >= 1; j-- {
-			s := m.Sglist[j]
-			if len(s) == 0 {
-				continue
-			}
-			p := uintptr(unsafe.Pointer(&s[0]))
-			if p >= storageStart && p < storageEnd {
-				newOffset = int(p-storageStart) + len(s)
-				break
-			}
-		}
-		m.offset = newOffset
+	i := 1
+	n -= OutMessageHeaderSize
+	for len(m.Sglist) > i && n >= len(m.Sglist[i]) {
+		n -= len(m.Sglist[i])
+		i++
 	}
+	if n > 0 {
+		m.Sglist[i] = m.Sglist[i][0:n]
+		i++
+	}
+	clear(m.Sglist[i:])
+	m.Sglist = m.Sglist[0:i]
+
+	storageStart := uintptr(unsafe.Pointer(&m.storage[0]))
+	storageEnd := storageStart + uintptr(len(m.storage))
+	newOffset := 0
+	for j := i - 1; j >= 1; j-- {
+		s := m.Sglist[j]
+		if len(s) == 0 {
+			continue
+		}
+		p := uintptr(unsafe.Pointer(&s[0]))
+		if p >= storageStart && p < storageEnd {
+			newOffset = int(p-storageStart) + len(s)
+			break
+		}
+	}
+	m.offset = newOffset
 }
 
 // Append is equivalent to growing by len(src), then copying src over the new

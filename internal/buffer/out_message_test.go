@@ -318,6 +318,21 @@ func TestOutMessageShrinkToRewindsInlineOffset(t *testing.T) {
 	}
 }
 
+func TestOutMessageShrinkToHeaderClearsZeroLengthSlice(t *testing.T) {
+	var om OutMessage
+	om.Reset()
+
+	om.Append([]byte{})
+	if len(om.Sglist) == 0 {
+		t.Fatal("expected non-empty Sglist after Append([]byte{})")
+	}
+
+	om.ShrinkTo(OutMessageHeaderSize)
+	if got := len(om.Sglist); got != 0 {
+		t.Fatalf("len(om.Sglist) = %d after ShrinkTo(OutMessageHeaderSize), want 0", got)
+	}
+}
+
 func BenchmarkOutMessageReset(b *testing.B) {
 	// A single buffer, which should fit in some level of CPU cache.
 	b.Run("Single buffer", func(b *testing.B) {
